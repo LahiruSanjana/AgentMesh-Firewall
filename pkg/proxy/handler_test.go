@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"agentmesh/pkg/auth"
 	"bytes"
 	"context"
 	"io"
@@ -10,19 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"agentmesh/pkg/mcp"
+	"agentmesh/pkg/auth"
 	"agentmesh/pkg/policy"
+	"agentmesh/pkg/mcp"
 )
 
 type mockPolicyEngine struct {
 	allow bool
 }
 
-func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput) (*policy.Decision, error) {
-	return &policy.Decision{
-		Allow:  m.allow,
-		Reason: "mock decision",
-	}, nil
+func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput, ) (*policy.Decision, error) {
+    return &policy.Decision{
+        Allow:  m.allow,
+        Reason: "mock decision",
+    }, nil
 }
 
 type mockDispatcher struct {
@@ -41,7 +41,7 @@ func (m *mockDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody
 }
 
 func TestProxyHandler_ServeHTTP(t *testing.T) {
-	// 1.Setup mock store & seed identities
+	// 1. Setup mock store & seed identities
 	store := auth.NewMemoryIdentityStore()
 
 	validTokeen := "ak_live_valid_123456"
@@ -86,8 +86,8 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		body:       `{"jsonrpc":"2.0","id":1,"result":{"status":"success"}}`,
 	}
 
-	handler := NewProxyHandler(store, allowPolicyEngine, mockDisp)
-	deniedHandler := NewProxyHandler(store, deniedPolicyEngine, mockDisp)
+	handler := NewProxyHandler(store, allowPolicyEngine, mockDisp, 100)
+	deniedHandler := NewProxyHandler(store, deniedPolicyEngine, mockDisp, 100)
 
 	test := []struct {
 		name           string
@@ -129,14 +129,14 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 			method:         http.MethodPost,
 			authHeader:     "Bearer " + expiredToken,
 			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
-			expectedStatus: http.StatusUnauthorized,
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:           "Invalid Token",
 			method:         http.MethodPost,
 			authHeader:     "Bearer invalid-token-xyz",
 			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
-			expectedStatus: http.StatusUnauthorized,
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:           "Method Not Allowed",

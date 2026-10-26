@@ -52,7 +52,8 @@ func main() {
 	targetURL := "http://localhost:9000/mcp"
 	dispatcher := proxy.NewHTTPDispatcher(targetURL, 10*time.Second)
 
-	handler := proxy.NewProxyHandler(store, engine, dispatcher)
+	rateLimitPerMin := 5 
+	handler := proxy.NewProxyHandler(store, engine, dispatcher, rateLimitPerMin)
 
 	log.Println("AgentMesh AI Firewall running on :9999...")
 	err = http.ListenAndServe(":9999", handler)

@@ -1,129 +1,191 @@
 package proxy
 
 import (
-	"encoding/json"
-	"errors"
+	"agentmesh/pkg/auth"
+	"agentmesh/pkg/limiter"
+	"agentmesh/pkg/mcp"
+	"agentmesh/pkg/policy"
+	"agentmesh/pkg/telemetry"
+	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
-
-	"agentmesh/pkg/auth"
-	"agentmesh/pkg/mcp"
-	"agentmesh/pkg/policy"
 )
 
-type ProxyHandler struct {
-	store      auth.IdentityResolver
-	engine     policy.Engine
-	dispatcher Dispatcher
+type PolicyEvaluator interface {
+	Evaluate(ctx context.Context, input map[string]interface{}) (*policy.Decision, error)
 }
 
-func NewProxyHandler(store auth.IdentityResolver, engine policy.Engine, dispatcher Dispatcher) *ProxyHandler {
+type RequestDispatcher interface {
+	Dispatch(ctx context.Context, targetURL string, rawBody []byte, originalHeaders http.Header) (*http.Response, error)
+}
+
+type ProxyHandler struct {
+	store       *auth.MemoryIdentityStore
+	engine      policy.Engine
+	dispatcher  RequestDispatcher
+	logger      *telemetry.AuditLogger
+	rateLimiter *limiter.RateLimiter
+}
+
+func NewProxyHandler(
+	store *auth.MemoryIdentityStore,
+	engine policy.Engine,
+	dispatcher RequestDispatcher,
+	rateLimitPerMin int,
+) *ProxyHandler {
 	return &ProxyHandler{
-		store:      store,
-		engine:     engine,
-		dispatcher: dispatcher,
+		store:       store,
+		engine:      engine,
+		dispatcher:  dispatcher,
+		logger:      telemetry.NewAuditLogger(),
+		rateLimiter: limiter.NewRateLimiter(rateLimitPerMin, 1*time.Minute),
 	}
 }
 
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if r.URL.Path != "/proxy" && r.URL.Path != "/" {
-        http.Error(w, "Not Found", http.StatusNotFound)
-        return
-    }
+	clientIP := r.RemoteAddr
 
-	authHeader := r.Header.Get("Authorization")
-
-	token, err := auth.ExtractBearerToken(authHeader)
+	// 1. Bearer Token Auth
+	token, err := auth.ExtractBearerToken(r.Header.Get("Authorization"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	keyHash := auth.HashKey(token)
-
-	agent, err := h.store.Resolve(r.Context(), keyHash)
-	if err != nil {
+		h.logger.Log(telemetry.AuditLog{
+			Allowed:    false,
+			Reason:     "Missing or invalid Authorization header",
+			StatusCode: http.StatusUnauthorized,
+			ClientIP:   clientIP,
+		})
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	err = auth.ValidateIdentity(agent, time.Now())
-	if err != nil {
-		if errors.Is(err, auth.ErrAgentInactive) {
-			http.Error(w, "Forbidden: agent is inactive", http.StatusForbidden)
-			return
-		}
-		http.Error(w, "Unauthorized: invalid identity", http.StatusUnauthorized)
+	keyHash := auth.HashKey(token)
+	identity, err := h.store.Resolve(r.Context(), keyHash)
+	if err != nil || auth.ValidateIdentity(identity, time.Now()) != nil {
+		h.logger.Log(telemetry.AuditLog{
+			Allowed:    false,
+			Reason:     "Invalid token or suspended agent",
+			StatusCode: http.StatusForbidden,
+			ClientIP:   clientIP,
+		})
+		http.Error(w, "Forbidden: agent is inactive", http.StatusForbidden)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+	// 2. Rate Limiting Check (Per Agent)
+	if !h.rateLimiter.Allow(identity.AgentID) {
+		h.logger.Log(telemetry.AuditLog{
+			AgentID:    identity.AgentID,
+			TenantID:   identity.TenantID,
+			Allowed:    false,
+			Reason:     "Rate limit exceeded (Too Many Requests)",
+			StatusCode: http.StatusTooManyRequests,
+			ClientIP:   clientIP,
+		})
+		http.Error(w, "Too Many Requests: Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 
-	var env mcp.Envelope
-	err = json.Unmarshal(body, &env)
+	// Read Body
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// 3. MCP Envelope Parsing & Normalization
+	envelope, err := mcp.ParseEnvelope(bodyBytes)
+	if err != nil {
+		h.logger.Log(telemetry.AuditLog{
+			AgentID:    identity.AgentID,
+			TenantID:   identity.TenantID,
+			Allowed:    false,
+			Reason:     "Invalid JSON-RPC payload",
+			StatusCode: http.StatusBadRequest,
+			ClientIP:   clientIP,
+		})
 		http.Error(w, "Invalid JSON-RPC payload", http.StatusBadRequest)
 		return
 	}
 
-	if err := env.Validate(); err != nil {
-		http.Error(w, "Invalid JSON-RPC payload: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var traceId = "trace-" + time.Now().Format("20060102150405")
-	policyInput, err := mcp.Normalize(&env, traceId, agent)
+	traceID := fmt.Sprintf("trace-%d", time.Now().UnixNano())
+	policyInputStruct, err := mcp.Normalize(envelope, traceID, identity)
 	if err != nil {
-		http.Error(w, "Failed to normalize request", http.StatusBadRequest)
-		return
-	}
-
-	decision, err := h.engine.Evaluate(r.Context(), policyInput)
-	if err != nil {
-		http.Error(w, "Failed to evaluate policy", http.StatusInternalServerError)
-		return
-	}
-
-	if !decision.Allow {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      env.ID,
-			"error": map[string]interface{}{
-				"code":    -32000,
-				"message": decision.Reason,
-				"data":    decision.Violations,
-			},
+		h.logger.Log(telemetry.AuditLog{
+			AgentID:    identity.AgentID,
+			TenantID:   identity.TenantID,
+			Allowed:    false,
+			Reason:     "Normalization failed: " + err.Error(),
+			StatusCode: http.StatusBadRequest,
+			ClientIP:   clientIP,
 		})
+		http.Error(w, "Invalid MCP Payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	resp, err := h.dispatcher.Dispatch(r.Context(), "", body, r.Header)
+	// 4. OPA Policy Evaluation
+	decision, err := h.engine.Evaluate(r.Context(), policyInputStruct)
+	if err != nil || !decision.Allow {
+		reason := "Policy violation"
+		if decision != nil && decision.Reason != "" {
+			reason = decision.Reason
+		}
+		h.logger.Log(telemetry.AuditLog{
+			AgentID:    identity.AgentID,
+			TenantID:   identity.TenantID,
+			Method:     string(policyInputStruct.Method),
+			ToolName:   policyInputStruct.ToolName,
+			Allowed:    false,
+			Reason:     reason,
+			StatusCode: http.StatusForbidden,
+			ClientIP:   clientIP,
+		})
+		http.Error(w, "Forbidden: "+reason, http.StatusForbidden)
+		return
+	}
+
+	// 5. Audit Log Success & Dispatching to Downstream
+	resp, err := h.dispatcher.Dispatch(r.Context(), r.URL.Path, bodyBytes, r.Header)
 	if err != nil {
+		h.logger.Log(telemetry.AuditLog{
+			AgentID:    identity.AgentID,
+			TenantID:   identity.TenantID,
+			Allowed:    false,
+			Reason:     "Downstream dispatch failed: " + err.Error(),
+			StatusCode: http.StatusBadGateway,
+			ClientIP:   clientIP,
+		})
 		http.Error(w, "Bad Gateway: failed to dispatch request to downstream", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
+	// Copy headers from downstream to client response
+	for k, values := range resp.Header {
+		for _, v := range values {
+			w.Header().Add(k, v)
 		}
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	io.Copy(w, resp.Body)
+
+	h.logger.Log(telemetry.AuditLog{
+		AgentID:    identity.AgentID,
+		TenantID:   identity.TenantID,
+		Method:     string(policyInputStruct.Method),
+		ToolName:   policyInputStruct.ToolName,
+		Allowed:    true,
+		Reason:     "Authorized and dispatched",
+		StatusCode: resp.StatusCode,
+		ClientIP:   clientIP,
+	})
 }

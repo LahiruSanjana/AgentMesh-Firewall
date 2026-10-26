@@ -103,3 +103,14 @@ func (e *Envelope) Classify() (MessageType, error) {
 
 	return MessageTypeUnknown, errors.New("unable to classify envelope")
 }
+
+func ParseEnvelope(data []byte) (*Envelope, error) {
+	var env Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	if err := env.Validate(); err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
