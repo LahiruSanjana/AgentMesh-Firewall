@@ -3,11 +3,26 @@ package proxy
 import (
 	"agentmesh/pkg/auth"
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"agentmesh/pkg/mcp"
+	"agentmesh/pkg/policy"
 )
+
+type mockPolicyEngine struct {
+	allow bool
+}
+
+func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput) (*policy.Decision, error) {
+	return &policy.Decision{
+		Allow:  m.allow,
+		Reason: "mock decision",
+	}, nil
+}
 
 func TestProxyHandler_ServeHTTP(t *testing.T) {
 	// 1.Setup mock store & seed identities
@@ -16,12 +31,13 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 	validTokeen := "ak_live_valid_123456"
 	validHash := auth.HashKey(validTokeen)
 	store.Set(&auth.AgentIdentity{
-		AgentID:    "agent-007",
-		TenantID:   "tenant-001",
-		KeyHash:    validHash,
-		Status:     auth.StatusActive,
-		TrustScore: 90,
-		ExpiresAt:  time.Now().Add(1 * time.Hour),
+		AgentID:       "agent-007",
+		TenantID:      "tenant-001",
+		KeyHash:       validHash,
+		Status:        auth.StatusActive,
+		TrustScore:    90,
+		AllowedScopes: []string{"read_file"},
+		ExpiresAt:     time.Now().Add(1 * time.Hour),
 	})
 
 	suspendedToken := "ak_live_suspended_99999"
@@ -38,69 +54,74 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 	expiredToken := "ak_live_expired_00000"
 	expeiredHash := auth.HashKey(expiredToken)
 	store.Set(&auth.AgentIdentity{
-		AgentID: "agent-expire",
-		TenantID: "tenant-bita",
-		KeyHash: expeiredHash,
-		Status: auth.StatusActive,
+		AgentID:    "agent-expire",
+		TenantID:   "tenant-bita",
+		KeyHash:    expeiredHash,
+		Status:     auth.StatusActive,
 		TrustScore: 50,
-		ExpiresAt : time.Now().Add(-1 * time.Hour),
+		ExpiresAt:  time.Now().Add(-1 * time.Hour),
 	})
 
-	handler := NewProxyHandler(store)
+	allowPolicyEngine := &mockPolicyEngine{allow: true}
+	deniedPolicyEngine := &mockPolicyEngine{allow: false}
+
+	handler := NewProxyHandler(store, allowPolicyEngine)
+	deniedHandler := NewProxyHandler(store, deniedPolicyEngine)
+
 	test := []struct {
-		name         string
-		method       string
-		authHeader   string
-		body         string
+		name           string
+		method         string
+		authHeader     string
+		body           string
 		expectedStatus int
-	} {
+	}{
 		{
-			name:          "Clean header",
-			method:        http.MethodPost,
-			authHeader:    "Bearer " + validTokeen,
-			body:          `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp"}}}`,
+			name:           "Clean header",
+			method:         http.MethodPost,
+			authHeader:     "Bearer " + validTokeen,
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp"}}}`,
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name: 		"Missing Authorization Header",
-			method: 	http.MethodPost,
-			authHeader: "",
-			body: 		`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Missing Authorization Header",
+			method:         http.MethodPost,
+			authHeader:     "",
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusUnauthorized,
 		},
 		{
-			name: 		"Malformed",
-			method: 	http.MethodPost,
-			authHeader: "secret-key-123",
-			body: 		`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Malformed",
+			method:         http.MethodPost,
+			authHeader:     "secret-key-123",
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusUnauthorized,
 		},
 		{
-			name: 		"Suspended Agent",
-			method: 	http.MethodPost,
-			authHeader: "Bearer " + suspendedToken,
-			body: 		`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Suspended Agent",
+			method:         http.MethodPost,
+			authHeader:     "Bearer " + suspendedToken,
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusForbidden,
 		},
 		{
-			name: 		"Expired Token",
-			method: 	http.MethodPost,
-			authHeader: "Bearer " + expiredToken,
-			body: 		`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Expired Token",
+			method:         http.MethodPost,
+			authHeader:     "Bearer " + expiredToken,
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusUnauthorized,
 		},
 		{
-			name: 		"Invalid Token",
-			method: 	http.MethodPost,
-			authHeader: "Bearer invalid-token-xyz",
-			body: 		`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Invalid Token",
+			method:         http.MethodPost,
+			authHeader:     "Bearer invalid-token-xyz",
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusUnauthorized,
 		},
 		{
-			name: "Method Not Allowed",
-			method: http.MethodGet,
-			authHeader: "Bearer " + validTokeen,
-			body: `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			name:           "Method Not Allowed",
+			method:         http.MethodGet,
+			authHeader:     "Bearer " + validTokeen,
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
 			expectedStatus: http.StatusMethodNotAllowed,
 		},
 	}
@@ -119,4 +140,17 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Policy Denied - Returns 403 Forbidden", func(t *testing.T) {
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp"}}}`
+		req := httptest.NewRequest(http.MethodPost, "/proxy", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer "+validTokeen)
+
+		rr := httptest.NewRecorder()
+		deniedHandler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("Expected status %d, got %d", http.StatusForbidden, rr.Code)
+		}
+	})
 }

@@ -1,22 +1,26 @@
 package proxy
 
 import (
-	"agentmesh/pkg/auth"
-	"agentmesh/pkg/mcp"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"time"
+
+	"agentmesh/pkg/auth"
+	"agentmesh/pkg/mcp"
+	"agentmesh/pkg/policy"
 )
 
 type ProxyHandler struct {
-	store auth.IdentityResolver
+	store  auth.IdentityResolver
+	engine policy.Engine
 }
 
-func NewProxyHandler(store auth.IdentityResolver) *ProxyHandler {
+func NewProxyHandler(store auth.IdentityResolver, engine policy.Engine) *ProxyHandler {
 	return &ProxyHandler{
-		store: store,
+		store:  store,
+		engine: engine,
 	}
 }
 
@@ -48,14 +52,14 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Forbidden: agent is inactive", http.StatusForbidden)
 			return
 		}
-		http.Error(w, "Request processed successfully", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized: invalid identity", http.StatusUnauthorized)
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit
 
 	body, err := io.ReadAll(r.Body)
-    if err != nil {	
+	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -79,8 +83,32 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	decision, err := h.engine.Evaluate(r.Context(), policyInput)
+	if err != nil {
+		http.Error(w, "Failed to evaluate policy", http.StatusInternalServerError)
+		return
+	}
+
+	if !decision.Allow {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      env.ID,
+			"error": map[string]interface{}{
+				"code":    -32000,
+				"message": decision.Reason,
+				"data":    decision.Violations,
+			},
+		})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(policyInput)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      env.ID,
+		"result":  "Request processed successfully",
+	})
 }
-

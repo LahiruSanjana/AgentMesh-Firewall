@@ -5,11 +5,11 @@ default reason := "access denied by security policy"
 
 violations[msg] {
     input.agent.trust_score < 70
-    msg := "Insufficient_trust_score"
+    msg := "insufficient_trust_score"
 }
 
 violations[msg] {
-    input.agent.status != "Active"
+    lower(input.agent.status) != "active"
     msg := "agent_status_not_active"
 }
 
@@ -25,6 +25,7 @@ violations[msg] {
 
 violations[msg] {
     input.method == "resources/read"
+    is_string(input.resource_uri)
     contains(input.resource_uri, "..")
     msg := "path_traversal_detected"
 }
