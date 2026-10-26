@@ -4,6 +4,7 @@ import (
 	"agentmesh/pkg/auth"
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,6 +23,21 @@ func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput)
 		Allow:  m.allow,
 		Reason: "mock decision",
 	}, nil
+}
+
+type mockDispatcher struct {
+	statusCode int
+	body       string
+}
+
+func (m *mockDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody []byte, originalHeaders http.Header) (*http.Response, error) {
+	resp := &http.Response{
+		StatusCode: m.statusCode,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(m.body)),
+	}
+	resp.Header.Set("Content-Type", "application/json")
+	return resp, nil
 }
 
 func TestProxyHandler_ServeHTTP(t *testing.T) {
@@ -65,8 +81,13 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 	allowPolicyEngine := &mockPolicyEngine{allow: true}
 	deniedPolicyEngine := &mockPolicyEngine{allow: false}
 
-	handler := NewProxyHandler(store, allowPolicyEngine)
-	deniedHandler := NewProxyHandler(store, deniedPolicyEngine)
+	mockDisp := &mockDispatcher{
+		statusCode: http.StatusOK,
+		body:       `{"jsonrpc":"2.0","id":1,"result":{"status":"success"}}`,
+	}
+
+	handler := NewProxyHandler(store, allowPolicyEngine, mockDisp)
+	deniedHandler := NewProxyHandler(store, deniedPolicyEngine, mockDisp)
 
 	test := []struct {
 		name           string

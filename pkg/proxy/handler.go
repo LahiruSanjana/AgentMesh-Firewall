@@ -13,14 +13,16 @@ import (
 )
 
 type ProxyHandler struct {
-	store  auth.IdentityResolver
-	engine policy.Engine
+	store      auth.IdentityResolver
+	engine     policy.Engine
+	dispatcher Dispatcher
 }
 
-func NewProxyHandler(store auth.IdentityResolver, engine policy.Engine) *ProxyHandler {
+func NewProxyHandler(store auth.IdentityResolver, engine policy.Engine, dispatcher Dispatcher) *ProxyHandler {
 	return &ProxyHandler{
-		store:  store,
-		engine: engine,
+		store:      store,
+		engine:     engine,
+		dispatcher: dispatcher,
 	}
 }
 
@@ -104,11 +106,19 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      env.ID,
-		"result":  "Request processed successfully",
-	})
+	resp, err := h.dispatcher.Dispatch(r.Context(), "", body, r.Header)
+	if err != nil {
+		http.Error(w, "Bad Gateway: failed to dispatch request to downstream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
