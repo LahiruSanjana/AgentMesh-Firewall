@@ -32,6 +32,11 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path != "/proxy" && r.URL.Path != "/" {
+        http.Error(w, "Not Found", http.StatusNotFound)
+        return
+    }
+
 	authHeader := r.Header.Get("Authorization")
 
 	token, err := auth.ExtractBearerToken(authHeader)

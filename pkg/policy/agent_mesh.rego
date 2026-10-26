@@ -14,7 +14,7 @@ violations[msg] {
 }
 
 tool_is_allowed {
-    input.agent.scopes[_] == input.tool_name
+    input.agent.allowed_scopes[_] == input.tool_name
 }
 
 violations[msg] {
