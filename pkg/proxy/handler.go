@@ -8,11 +8,14 @@ import (
 	"agentmesh/pkg/telemetry"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+const maxRequestBodySize = 1 << 20
 
 type PolicyEvaluator interface {
 	Evaluate(ctx context.Context, input map[string]interface{}) (*policy.Decision, error)
@@ -94,8 +97,22 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read Body
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			h.logger.Log(telemetry.AuditLog{
+				AgentID:    identity.AgentID,
+				TenantID:   identity.TenantID,
+				Allowed:    false,
+				Reason:     "Request body too large",
+				StatusCode: http.StatusRequestEntityTooLarge,
+				ClientIP:   clientIP,
+			})
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
@@ -132,8 +149,12 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. OPA Policy Evaluation
+	if h.engine == nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 	decision, err := h.engine.Evaluate(r.Context(), policyInputStruct)
-	if err != nil || !decision.Allow {
+	if err != nil || decision == nil || !decision.Allow {
 		reason := "Policy violation"
 		if decision != nil && decision.Reason != "" {
 			reason = decision.Reason
@@ -153,7 +174,11 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Audit Log Success & Dispatching to Downstream
-	resp, err := h.dispatcher.Dispatch(r.Context(), r.URL.Path, bodyBytes, r.Header)
+	if h.dispatcher == nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	resp, err := h.dispatcher.Dispatch(r.Context(), "", bodyBytes, r.Header)
 	if err != nil {
 		h.logger.Log(telemetry.AuditLog{
 			AgentID:    identity.AgentID,

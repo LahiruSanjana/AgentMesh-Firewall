@@ -6,52 +6,48 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
-	"time"
 	"sync"
+	"time"
 )
 
 type AgentStatus string
 
 const (
-	StatusActive  AgentStatus = "ACTIVE"
+	StatusActive    AgentStatus = "ACTIVE"
 	StatusSuspended AgentStatus = "SUSPENDED"
-	StatusRevoked AgentStatus = "REVOKED"
+	StatusRevoked   AgentStatus = "REVOKED"
 )
 
 var (
-	ErrMissingAuth = errors.New("missing authentication information")
-	ErrInvalidToken = errors.New("invalid or malformed token")
+	ErrMissingAuth   = errors.New("missing authentication information")
+	ErrInvalidToken  = errors.New("invalid or malformed token")
 	ErrAgentInactive = errors.New("agent is not active or suspended")
-    ErrAgentExpired = errors.New("agent's token has expired")
+	ErrAgentExpired  = errors.New("agent's token has expired")
 )
 
 type AgentIdentity struct {
-	AgentID string      `json:"agent_id"`
-	TenantID string      `json:"tenant_id"`
-	KeyHash string       `json:"key_hash"`
-	Status AgentStatus  `json:"status"`
-	TrustScore int 	   `json:"trust_score"`
-	AllowedScopes []string   `json:"allowed_scopes"`
+	AgentID       string      `json:"agent_id"`
+	TenantID      string      `json:"tenant_id"`
+	KeyHash       string      `json:"key_hash"`
+	Status        AgentStatus `json:"status"`
+	TrustScore    int         `json:"trust_score"`
+	AllowedScopes []string    `json:"allowed_scopes"`
 	RateLimitTier string      `json:"rate_limit_tier"`
-	ExpiresAt time.Time   `json:"expires_at"`
+	ExpiresAt     time.Time   `json:"expires_at"`
 }
 
 func ExtractBearerToken(authHeader string) (string, error) {
-	trimed := strings.TrimSpace(authHeader)
-	if trimed == "" {
+	trimmed := strings.TrimSpace(authHeader)
+	if trimmed == "" {
 		return "", ErrMissingAuth
 	}
 
-	if !strings.HasPrefix(trimed, "Bearer "){
+	parts := strings.Fields(trimmed)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return "", ErrInvalidToken
 	}
 
-	token := strings.TrimPrefix(trimed, "Bearer ")
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", ErrInvalidToken
-	}
-	return token, nil
+	return parts[1], nil
 }
 
 func HashKey(rawKey string) string {
@@ -66,7 +62,7 @@ type IdentityResolver interface {
 }
 
 type MemoryIdentityStore struct {
-	mu sync.RWMutex
+	mu         sync.RWMutex
 	identities map[string]*AgentIdentity
 }
 
@@ -76,15 +72,14 @@ func NewMemoryIdentityStore() *MemoryIdentityStore {
 	}
 }
 
-func (s *MemoryIdentityStore) Set(identity *AgentIdentity){
-
+func (s *MemoryIdentityStore) Set(identity *AgentIdentity) {
 	if identity == nil {
 		return
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.identities[identity.KeyHash] = identity
+	s.identities[identity.KeyHash] = cloneIdentity(identity)
 }
 
 func (s *MemoryIdentityStore) Resolve(ctx context.Context, keyHash string) (*AgentIdentity, error) {
@@ -96,8 +91,18 @@ func (s *MemoryIdentityStore) Resolve(ctx context.Context, keyHash string) (*Age
 		return nil, ErrInvalidToken
 	}
 
-	return identity, nil
+	return cloneIdentity(identity), nil
 
+}
+
+func cloneIdentity(identity *AgentIdentity) *AgentIdentity {
+	if identity == nil {
+		return nil
+	}
+
+	cloned := *identity
+	cloned.AllowedScopes = append([]string(nil), identity.AllowedScopes...)
+	return &cloned
 }
 
 func ValidateIdentity(identity *AgentIdentity, now time.Time) error {

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +43,9 @@ func (d *HTTPDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody
 	if urlToUse == "" {
 		urlToUse = d.targetURL
 	}
+	if urlToUse == "" {
+		return nil, errors.New("downstream target URL is empty")
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, urlToUse, bytes.NewReader(rawBody))
 
@@ -50,7 +54,7 @@ func (d *HTTPDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody
 	}
 
 	for key, values := range originalHeaders {
-		if isHopByHop(key) {
+		if isHopByHop(key) || strings.EqualFold(key, "authorization") {
 			continue
 		}
 		for _, value := range values {

@@ -13,6 +13,14 @@
 *.out
 coverage.html
 coverprofile.out
+coverage/
+
+# Runtime and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
 
 # Go workspace files
 go.work
@@ -32,6 +40,7 @@ vendor/
 .idea/
 *.swp
 *.swo
+*.code-workspace
 
 # Operating system files
 .DS_Store

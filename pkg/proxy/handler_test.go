@@ -10,27 +10,33 @@ import (
 	"time"
 
 	"agentmesh/pkg/auth"
-	"agentmesh/pkg/policy"
 	"agentmesh/pkg/mcp"
+	"agentmesh/pkg/policy"
 )
 
 type mockPolicyEngine struct {
-	allow bool
+	allow       bool
+	nilDecision bool
 }
 
-func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput, ) (*policy.Decision, error) {
-    return &policy.Decision{
-        Allow:  m.allow,
-        Reason: "mock decision",
-    }, nil
+func (m *mockPolicyEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput) (*policy.Decision, error) {
+	if m.nilDecision {
+		return nil, nil
+	}
+	return &policy.Decision{
+		Allow:  m.allow,
+		Reason: "mock decision",
+	}, nil
 }
 
 type mockDispatcher struct {
 	statusCode int
 	body       string
+	targetURL  string
 }
 
 func (m *mockDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody []byte, originalHeaders http.Header) (*http.Response, error) {
+	m.targetURL = targetURL
 	resp := &http.Response{
 		StatusCode: m.statusCode,
 		Header:     make(http.Header),
@@ -160,6 +166,10 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 				t.Errorf("Expected status %d, got %d", tt.expectedStatus, rr.Code)
 			}
 		})
+
+		if mockDisp.targetURL != "" {
+			t.Fatalf("handler must use the dispatcher's configured target URL, got %q", mockDisp.targetURL)
+		}
 	}
 
 	t.Run("Policy Denied - Returns 403 Forbidden", func(t *testing.T) {
@@ -172,6 +182,33 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 
 		if rr.Code != http.StatusForbidden {
 			t.Errorf("Expected status %d, got %d", http.StatusForbidden, rr.Code)
+		}
+	})
+
+	t.Run("Nil policy decision returns 403 instead of panicking", func(t *testing.T) {
+		handler := NewProxyHandler(store, &mockPolicyEngine{nilDecision: true}, mockDisp, 100)
+		req := httptest.NewRequest(http.MethodPost, "/proxy", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file"}}`))
+		req.Header.Set("Authorization", "Bearer "+validTokeen)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("Expected status %d, got %d", http.StatusForbidden, rr.Code)
+		}
+	})
+
+	t.Run("Oversized body returns 413", func(t *testing.T) {
+		handler := NewProxyHandler(store, allowPolicyEngine, mockDisp, 100)
+		body := bytes.Repeat([]byte("a"), maxRequestBodySize+1)
+		req := httptest.NewRequest(http.MethodPost, "/proxy", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+validTokeen)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("Expected status %d, got %d", http.StatusRequestEntityTooLarge, rr.Code)
 		}
 	})
 }
