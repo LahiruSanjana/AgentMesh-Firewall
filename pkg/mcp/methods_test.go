@@ -1,9 +1,9 @@
 package mcp
 
 import (
-	"testing"
-	"encoding/json"
 	"agentmesh/pkg/auth"
+	"encoding/json"
+	"testing"
 )
 
 func TestNormalize(t *testing.T) {
@@ -45,9 +45,9 @@ func TestNormalize(t *testing.T) {
 
 	mockAgent := &auth.AgentIdentity{
 		AgentID:    "agent-007",
-        TenantID:   "tenant-corp",
-        Status:     auth.StatusActive,
-        TrustScore: 90,
+		TenantID:   "tenant-corp",
+		Status:     auth.StatusActive,
+		TrustScore: 90,
 	}
 
 	for _, tt := range tests {

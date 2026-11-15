@@ -1,16 +1,18 @@
 package policy
 
 import (
+	"agentmesh/pkg/mcp"
 	"context"
 	"time"
-	"agentmesh/pkg/mcp"
 )
 
 type Decision struct {
 	Allow              bool          `json:"allow"`
 	Reason             string        `json:"reason"`
 	Violations         []string      `json:"violations"`
-	EvaluationDuration time.Duration `json:"evaluation_duration"` 
+	Action             string        `json:"action,omitempty"`
+	Retryable          bool          `json:"retryable"`
+	EvaluationDuration time.Duration `json:"evaluation_duration"`
 }
 
 type Engine interface {

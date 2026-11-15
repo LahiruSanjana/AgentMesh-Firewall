@@ -61,6 +61,8 @@ func (e *OPAEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput) (*Deci
 
 	allow, _ := decision["allow"].(bool)
 	reason, _ := decision["reason"].(string)
+	action, _ := decision["action"].(string)
+	retryable, _ := decision["retryable"].(bool)
 
 	var violations []string
 	if rawViolations, ok := decision["violations"].([]interface{}); ok {
@@ -75,6 +77,8 @@ func (e *OPAEngine) Evaluate(ctx context.Context, input *mcp.PolicyInput) (*Deci
 		Allow:              allow,
 		Reason:             reason,
 		Violations:         violations,
+		Action:             action,
+		Retryable:          retryable,
 		EvaluationDuration: time.Since(start),
 	}, nil
 

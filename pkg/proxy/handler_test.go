@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"agentmesh/pkg/auth"
+	"agentmesh/pkg/config"
 	"agentmesh/pkg/mcp"
 	"agentmesh/pkg/policy"
 )
@@ -94,6 +96,8 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 
 	handler := NewProxyHandler(store, allowPolicyEngine, mockDisp, 100)
 	deniedHandler := NewProxyHandler(store, deniedPolicyEngine, mockDisp, 100)
+	defer handler.Stop()
+	defer deniedHandler.Stop()
 
 	test := []struct {
 		name           string
@@ -209,6 +213,34 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 
 		if rr.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("Expected status %d, got %d", http.StatusRequestEntityTooLarge, rr.Code)
+		}
+	})
+
+	t.Run("Health and readiness endpoints are unauthenticated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"status":"ok"`) {
+			t.Fatalf("unexpected health response: %d %s", rr.Code, rr.Body.String())
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rr = httptest.NewRecorder()
+		readyHandler := NewProxyHandlerWithConfig(store, allowPolicyEngine, mockDisp, config.Defaults())
+		readyHandler.ServeHTTP(rr, req)
+		readyHandler.Stop()
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected ready response, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Notification returns accepted without response body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
+		req.Header.Set("Authorization", "Bearer "+validTokeen)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusAccepted || rr.Body.Len() != 0 {
+			t.Fatalf("expected empty 202 notification response, got %d %q", rr.Code, rr.Body.String())
 		}
 	})
 }

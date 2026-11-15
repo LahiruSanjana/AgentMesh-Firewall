@@ -38,6 +38,17 @@ func isHopByHop(headerKey string) bool {
 	}
 }
 
+func filterHopByHopHeaders(headers http.Header) http.Header {
+	filtered := make(http.Header)
+	for key, values := range headers {
+		if isHopByHop(key) {
+			continue
+		}
+		filtered[key] = append([]string(nil), values...)
+	}
+	return filtered
+}
+
 func (d *HTTPDispatcher) Dispatch(ctx context.Context, targetURL string, rawBody []byte, originalHeaders http.Header) (*http.Response, error) {
 	urlToUse := targetURL
 	if urlToUse == "" {

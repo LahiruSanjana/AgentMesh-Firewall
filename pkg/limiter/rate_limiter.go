@@ -10,6 +10,8 @@ type RateLimiter struct {
 	requests map[string][]time.Time
 	limit    int           // Rate limit count
 	window   time.Duration // Time window (e.g., 1 minute)
+	stop     chan struct{}
+	done     chan struct{}
 }
 
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
@@ -17,6 +19,8 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 		requests: make(map[string][]time.Time),
 		limit:    limit,
 		window:   window,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
 	// Clean up old entries periodically
@@ -49,24 +53,41 @@ func (rl *RateLimiter) Allow(key string) bool {
 }
 
 func (rl *RateLimiter) cleanup() {
+	defer close(rl.done)
+	ticker := time.NewTicker(rl.window)
+	defer ticker.Stop()
 	for {
-		time.Sleep(rl.window)
-		rl.mu.Lock()
-		now := time.Now()
-		cutoff := now.Add(-rl.window)
-		for key, times := range rl.requests {
-			var valid []time.Time
-			for _, t := range times {
-				if t.After(cutoff) {
-					valid = append(valid, t)
+		select {
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			cutoff := now.Add(-rl.window)
+			for key, times := range rl.requests {
+				var valid []time.Time
+				for _, t := range times {
+					if t.After(cutoff) {
+						valid = append(valid, t)
+					}
+				}
+				if len(valid) == 0 {
+					delete(rl.requests, key)
+				} else {
+					rl.requests[key] = valid
 				}
 			}
-			if len(valid) == 0 {
-				delete(rl.requests, key)
-			} else {
-				rl.requests[key] = valid
-			}
+			rl.mu.Unlock()
+		case <-rl.stop:
+			return
 		}
-		rl.mu.Unlock()
+	}
+}
+
+func (rl *RateLimiter) Stop() {
+	select {
+	case <-rl.stop:
+		return
+	default:
+		close(rl.stop)
+		<-rl.done
 	}
 }

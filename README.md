@@ -1,5 +1,7 @@
 # AgentMesh Firewall
 
+Version 1.0.0
+
 AgentMesh Firewall is a Go security gateway for AI agents that communicate
 with Model Context Protocol (MCP) tool providers. It authenticates requests,
 validates JSON-RPC 2.0 messages, normalizes MCP parameters, evaluates an
@@ -12,13 +14,15 @@ OPA/Rego policy, and forwards authorized requests to a downstream MCP service.
 - Thread-safe in-memory identity store with status, expiry, and trust-score
   validation.
 - Per-agent rate limiting.
-- 1 MiB request-body limit.
+- Configurable request and downstream response size limits.
 - MCP normalization for `tools/call` and `resources/read`.
-- OPA/Rego authorization with tenant, trust-score, tool-scope, and path
-  traversal checks.
+- OPA/Rego authorization with default-deny MCP method allowlisting, tenant
+  isolation, trust-score, tool-scope, and sensitive-path checks.
 - Downstream HTTP dispatch with hop-by-hop and gateway authorization headers
   removed.
-- JSON audit logging.
+- Structured JSON audit logging.
+- Structured JSON-RPC errors with remediation hints and trace IDs.
+- Graceful shutdown on `SIGINT` and `SIGTERM`.
 
 ## Requirements
 
@@ -47,27 +51,112 @@ Start the firewall in another terminal:
 go run ./cmd/proxy
 ```
 
-The firewall listens on `http://localhost:9999` and forwards authorized
-requests to `http://localhost:9000/mcp`. These addresses, demo identities,
-and the rate limit are configured in [cmd/proxy/main.go](cmd/proxy/main.go).
+The firewall listens on `http://127.0.0.1:9999` and forwards authorized
+requests to `http://127.0.0.1:9000/mcp` by default. Configuration is loaded
+with this precedence:
 
-The proxy currently reads the policy using a relative path, so run commands
-from the repository root.
+```text
+CLI flags > AGENTMESH_* environment variables > agentmesh.yaml > safe defaults
+```
+
+Copy [agentmesh.example.yaml](agentmesh.example.yaml) to `agentmesh.yaml`,
+then replace the placeholder `token_hash` with the SHA-256 hash of a
+high-entropy bearer token. Never place the raw token in the configuration file.
+
+The default policy path is relative to the repository root. Use an absolute
+path when starting the binary from another working directory.
+
+The proxy also exposes unauthenticated operational endpoints:
+
+```text
+GET /healthz  -> 200 {"status":"ok"}
+GET /readyz   -> 200 {"status":"ready"}
+```
+
+`/readyz` returns `503` when the policy engine, dispatcher, or downstream URL
+is not configured correctly.
+
+### Configuration
+
+Supported YAML fields include:
+
+| Field | Description |
+| --- | --- |
+| `listen_addr` | HTTP listen address |
+| `downstream_url` | Downstream MCP endpoint |
+| `policy_path` | OPA/Rego policy file |
+| `rate_limit_per_minute` | Per-agent request limit |
+| `downstream_timeout` | Downstream request timeout |
+| `max_request_body_bytes` | Maximum inbound request size |
+| `max_response_body_bytes` | Maximum downstream response size |
+| `read_header_timeout`, `read_timeout`, `write_timeout`, `idle_timeout` | HTTP server timeouts |
+| `identities` | Configured agent identity records |
+
+The following environment variables override matching YAML values:
+
+```text
+AGENTMESH_LISTEN_ADDR
+AGENTMESH_DOWNSTREAM_URL
+AGENTMESH_POLICY_PATH
+AGENTMESH_RATE_LIMIT_PER_MINUTE
+AGENTMESH_DOWNSTREAM_TIMEOUT
+AGENTMESH_READ_HEADER_TIMEOUT
+AGENTMESH_READ_TIMEOUT
+AGENTMESH_WRITE_TIMEOUT
+AGENTMESH_IDLE_TIMEOUT
+```
+
+CLI overrides:
+
+```bash
+go run ./cmd/proxy --config ./agentmesh.yaml --listen 127.0.0.1:9999
+go run ./cmd/proxy --downstream http://localhost:9000/mcp
+go run ./cmd/proxy --policy ./pkg/policy/agent_mesh.rego
+go run ./cmd/proxy --version
+```
 
 ## Example request
 
-The active demo identity uses the token `ak_live_valid_123456`.
+Configure an active identity in `agentmesh.yaml` and use its corresponding
+high-entropy token.
 
 ```bash
 curl -i http://localhost:9999/mcp ^
-  -H "Authorization: Bearer ak_live_valid_123456" ^
+  -H "Authorization: Bearer <configured-token>" ^
   -H "Content-Type: application/json" ^
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"/tmp\"}}}"
 ```
 
 The request is allowed when it satisfies the policy and the downstream
-response is returned to the client. The suspended demo identity is rejected
-with HTTP 403.
+response is returned to the client. Policy, validation, authentication, and
+downstream failures are returned as structured JSON-RPC 2.0 errors with a
+remediation hint and trace ID. Notifications are forwarded without a response
+body and return HTTP 202.
+
+Example policy denial:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "Request blocked by AgentMesh security policy",
+    "data": {
+      "violation": "tool_not_permitted",
+      "action": "Use an allowed tool.",
+      "retryable": false,
+      "trace_id": "trace-123"
+    }
+  }
+}
+```
+
+The bundled policy explicitly supports `initialize`, `notifications/initialized`,
+`tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`,
+and `prompts/get`. Unknown methods are denied by default. Resource reads reject
+path traversal and sensitive locations such as `.env`, `.ssh`, `.git/config`,
+`/etc`, and `C:\Windows`.
 
 ## Running tests
 
@@ -90,6 +179,12 @@ go vet ./...
 go build ./...
 ```
 
+Run the race detector when a CGO-compatible C compiler is installed:
+
+```bash
+CGO_ENABLED=1 go test -race ./...
+```
+
 ## Project structure
 
 ```text
@@ -99,6 +194,7 @@ go build ./...
 │   └── proxy/                # Firewall server entrypoint
 ├── pkg/
 │   ├── auth/                 # Authentication and identity validation
+│   ├── config/               # YAML, environment, and CLI configuration
 │   ├── limiter/              # Per-key rate limiting
 │   ├── mcp/                  # JSON-RPC and MCP normalization
 │   ├── policy/               # Policy interface, OPA engine, and Rego policy
@@ -111,13 +207,15 @@ go build ./...
 
 ## Security notes
 
-- The demo credentials in `cmd/proxy/main.go` are for local testing only.
+- The example identity hash is a placeholder for local testing only.
 - Replace the in-memory identity store with a persistent, managed identity
-  provider before production use.
+  provider for multi-instance production use.
 - Configure downstream URLs and credentials outside source code for production.
 - Do not log raw bearer tokens.
-- Review and harden the Rego policy before exposing the service to untrusted
-  clients.
+- Keep policy files and identity configuration under controlled deployment
+  ownership.
+- The default identity store is process-local; multiple proxy instances need a
+  shared identity and rate-limit strategy.
 
 ## License
 

@@ -38,13 +38,15 @@ type PromptGetParams struct {
 }
 
 type PolicyInput struct {
-	TraceID     string              `json:"trace_id"`
-	Agent       *auth.AgentIdentity `json:"agent"`
-	Method      MCPMethod           `json:"method"`
-	ToolName    string              `json:"tool_name,omitempty"`
-	ResourceURI string              `json:"resource_uri,omitempty"`
-	RawArgs     *json.RawMessage    `json:"raw_args,omitempty"`
-	ReceivedAt  time.Time           `json:"received_at"`
+	TraceID      string              `json:"trace_id"`
+	Agent        *auth.AgentIdentity `json:"agent"`
+	Identity     *auth.AgentIdentity `json:"identity"`
+	Method       MCPMethod           `json:"method"`
+	ToolName     string              `json:"tool_name,omitempty"`
+	ResourceURI  string              `json:"resource_uri,omitempty"`
+	TargetTenant string              `json:"target_tenant,omitempty"`
+	RawArgs      *json.RawMessage    `json:"raw_args,omitempty"`
+	ReceivedAt   time.Time           `json:"received_at"`
 }
 
 func Normalize(env *Envelope, traceID string, agent *auth.AgentIdentity) (*PolicyInput, error) {
@@ -59,7 +61,8 @@ func Normalize(env *Envelope, traceID string, agent *auth.AgentIdentity) (*Polic
 	method := MCPMethod(*env.Method)
 
 	input := &PolicyInput{
-		Agent:     agent,
+		Agent:      agent,
+		Identity:   agent,
 		TraceID:    traceID,
 		Method:     method,
 		ReceivedAt: time.Now().UTC(),
@@ -118,4 +121,41 @@ func Normalize(env *Envelope, traceID string, agent *auth.AgentIdentity) (*Polic
 	}
 
 	return input, nil
+}
+
+func (p PolicyInput) MarshalJSON() ([]byte, error) {
+	type policyIdentity struct {
+		AgentID       string           `json:"agent_id"`
+		TenantID      string           `json:"tenant_id"`
+		Status        auth.AgentStatus `json:"status"`
+		TrustScore    int              `json:"trust_score"`
+		AllowedScopes []string         `json:"allowed_scopes"`
+		RateLimitTier string           `json:"rate_limit_tier,omitempty"`
+		ExpiresAt     time.Time        `json:"expires_at"`
+	}
+	sanitize := func(identity *auth.AgentIdentity) *policyIdentity {
+		if identity == nil {
+			return nil
+		}
+		return &policyIdentity{
+			AgentID: identity.AgentID, TenantID: identity.TenantID,
+			Status: identity.Status, TrustScore: identity.TrustScore,
+			AllowedScopes: append([]string(nil), identity.AllowedScopes...),
+			RateLimitTier: identity.RateLimitTier, ExpiresAt: identity.ExpiresAt,
+		}
+	}
+	return json.Marshal(struct {
+		TraceID      string           `json:"trace_id"`
+		Agent        *policyIdentity  `json:"agent"`
+		Identity     *policyIdentity  `json:"identity"`
+		Method       MCPMethod        `json:"method"`
+		ToolName     string           `json:"tool_name,omitempty"`
+		ResourceURI  string           `json:"resource_uri,omitempty"`
+		TargetTenant string           `json:"target_tenant,omitempty"`
+		RawArgs      *json.RawMessage `json:"raw_args,omitempty"`
+		ReceivedAt   time.Time        `json:"received_at"`
+	}{
+		p.TraceID, sanitize(p.Agent), sanitize(p.Identity), p.Method,
+		p.ToolName, p.ResourceURI, p.TargetTenant, p.RawArgs, p.ReceivedAt,
+	})
 }

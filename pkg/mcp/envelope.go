@@ -5,37 +5,37 @@ import (
 	"errors"
 )
 
-type MessageType string 
+type MessageType string
 
 const (
-	CodeParseError = -32700
+	CodeParseError     = -32700
 	CodeInvalidRequest = -32600
 	CodeMethodNotFound = -32601
-	CodeInvalidParams = -32602
-	CodeInternalError = -32603
+	CodeInvalidParams  = -32602
+	CodeInternalError  = -32603
 
 	// Agent Mesh customer error
-	CodePolicyError = -32001
-	CodeApprovalTimeout = -32002
-    CodeApprovalRejected = -32003
+	CodePolicyError          = -32001
+	CodeApprovalTimeout      = -32002
+	CodeApprovalRejected     = -32003
 	CodeTenantScopeViolation = -32004
 )
 
 const (
-	MessageTypeUnknown MessageType = "UNKONWN"
-	MessageTypeRequest MessageType = "REQUEST"
+	MessageTypeUnknown      MessageType = "UNKONWN"
+	MessageTypeRequest      MessageType = "REQUEST"
 	MessageTypeNotification MessageType = "NOTIFICATION"
-	MessageTypeResponse MessageType = "RESPONSE"
+	MessageTypeResponse     MessageType = "RESPONSE"
 )
 
 type RPCError struct {
-	Code   int     `json:"code"`
-	Message string `json:"message"`
-	Data    *json.RawMessage `json:"data,omitempty"`
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
 }
 
 type Envelope struct {
-	JSONRPC  string     `json:"jsonrpc"`
+	JSONRPC string           `json:"jsonrpc"`
 	ID      *json.RawMessage `json:"id,omitempty"`
 	Method  *string          `json:"method,omitempty"`
 	Params  *json.RawMessage `json:"params,omitempty"`
@@ -44,10 +44,10 @@ type Envelope struct {
 }
 
 var (
-	ErrInvalidJSONRPC = errors.New("jsonrpc version must be exactly '2.0'")
+	ErrInvalidJSONRPC        = errors.New("jsonrpc version must be exactly '2.0'")
 	ErrMissingMethodOrResult = errors.New("must contain either method (request) or result/error (response)")
-	ErrAmbiguousPayload = errors.New("cannot contain both method and result/error simultaneously")
-	ErrInvalidErrorObj = errors.New("error response must have non-zero code and non empty message")
+	ErrAmbiguousPayload      = errors.New("cannot contain both method and result/error simultaneously")
+	ErrInvalidErrorObj       = errors.New("error response must have non-zero code and non empty message")
 )
 
 func (e *Envelope) Validate() error {
@@ -78,14 +78,13 @@ func (e *Envelope) Validate() error {
 	return nil
 }
 
-
 func (e *Envelope) Classify() (MessageType, error) {
 
-    if err := e.Validate(); err != nil {
+	if err := e.Validate(); err != nil {
 		return MessageTypeUnknown, err
 	}
 
-	hasID := e.ID != nil 
+	hasID := e.ID != nil
 	hasMethod := e.Method != nil && *e.Method != ""
 	hasResultOrError := e.Result != nil || e.Error != nil
 
@@ -113,4 +112,28 @@ func ParseEnvelope(data []byte) (*Envelope, error) {
 		return nil, err
 	}
 	return &env, nil
+}
+
+type ErrorData struct {
+	Violation string `json:"violation,omitempty"`
+	Method    string `json:"method,omitempty"`
+	Tool      string `json:"tool,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Retryable bool   `json:"retryable"`
+	TraceID   string `json:"trace_id,omitempty"`
+}
+
+func ErrorResponse(id *json.RawMessage, code int, message string, data ErrorData) Envelope {
+	return Envelope{JSONRPC: "2.0", ID: id, Error: &RPCError{Code: code, Message: message, Data: data}}
+}
+
+func RequestID(data []byte) *json.RawMessage {
+	var raw struct {
+		ID *json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(data, &raw) != nil || raw.ID == nil {
+		return nil
+	}
+	id := append(json.RawMessage(nil), (*raw.ID)...)
+	return &id
 }
